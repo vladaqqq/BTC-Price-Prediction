@@ -16,6 +16,7 @@ from sklearn.metrics import (
     mean_squared_error
 )
 import optuna
+from optuna.samplers import TPESampler
 
 # Настройка логирования
 logging.basicConfig(
@@ -37,7 +38,8 @@ class EnhancedBTCPredictor:
         self.initialized = False
         self.feature_names = []
         self.scaler_fitted = False
-        self.metrics: Dict[str, float] = {}  # Для хранения метрик
+        self.metrics: Dict[str, float] = {}
+        self.random_seed = 42  # Фиксированный seed для воспроизводимости
 
     def initialize(self):
         """Инициализация модели с подсчётом метрик"""
@@ -58,7 +60,7 @@ class EnhancedBTCPredictor:
 
             # Обучение и оценка
             self.train_final_model(X, y)
-            self.calculate_metrics(X, y)  # <- Новый метод для метрик
+            self.calculate_metrics(X, y)
 
             self.initialized = True
             logger.info(f"Model initialized. Metrics: {self.metrics}")
@@ -93,43 +95,6 @@ class EnhancedBTCPredictor:
             "RMSE": round(rmse, 6)
         }
 
-    def optimize_hyperparameters(self, X: pd.DataFrame, y: pd.Series) -> dict:
-        """Оптимизация с подсчётом Directional Accuracy"""
-
-        def objective(trial):
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 500, 2000),
-                'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.1),
-                'num_leaves': trial.suggest_int('num_leaves', 20, 100),
-                'max_depth': trial.suggest_int('max_depth', 3, 12),
-                'min_child_samples': trial.suggest_int('min_child_samples', 10, 100),
-                'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-            }
-
-            tscv = TimeSeriesSplit(n_splits=5)
-            mae_scores = []
-            da_scores = []
-
-            for train_idx, val_idx in tscv.split(X):
-                X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-                y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-
-                model = LGBMRegressor(**params)
-                model.fit(X_train, y_train)
-                y_pred = model.predict(X_val)
-
-                mae_scores.append(mean_absolute_error(y_val, y_pred))
-                da_scores.append(np.mean(np.sign(y_val) == np.sign(y_pred)))
-
-            # Возвращаем MAE для оптимизации
-            return np.mean(mae_scores)
-
-        study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=100)
-
-        logger.info(f"Best MAE during optimization: {study.best_value:.6f}")
-        return study.best_params
     def load_data(self, days: int = 2000) -> pd.DataFrame:
         """Загрузка данных с Binance API"""
         url = "https://api.binance.com/api/v3/klines"
@@ -188,7 +153,7 @@ class EnhancedBTCPredictor:
         return df.drop(columns=['target']), df['target']
 
     def optimize_hyperparameters(self, X: pd.DataFrame, y: pd.Series) -> dict:
-        """Оптимизация гиперпараметров"""
+        """Оптимизация гиперпараметров с фиксированным seed"""
 
         def objective(trial):
             params = {
@@ -199,6 +164,7 @@ class EnhancedBTCPredictor:
                 'min_child_samples': trial.suggest_int('min_child_samples', 10, 100),
                 'subsample': trial.suggest_float('subsample', 0.5, 1.0),
                 'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                'random_state': self.random_seed  # Фиксируем seed
             }
 
             tscv = TimeSeriesSplit(n_splits=5)
@@ -219,14 +185,20 @@ class EnhancedBTCPredictor:
 
             return np.mean(scores)
 
-        study = optuna.create_study(direction='minimize')
+        study = optuna.create_study(
+            direction='minimize',
+            sampler=TPESampler(seed=self.random_seed)  # Фиксируем seed
+        )
         study.optimize(objective, n_trials=30)
         return study.best_params
 
     def train_final_model(self, X: pd.DataFrame, y: pd.Series):
-        """Обучение финальной модели"""
+        """Обучение финальной модели с фиксированным seed"""
         X_scaled = self.scaler.transform(X)
-        self.model = LGBMRegressor(**self.best_params)
+        self.model = LGBMRegressor(
+            **self.best_params,
+            random_state=self.random_seed  # Фиксируем seed
+        )
         self.model.fit(
             X_scaled, y,
             feature_name=X.columns.tolist(),
@@ -254,7 +226,7 @@ class EnhancedBTCPredictor:
 
         return {
             "current_price": round(current_price, 2),
-            "metrics": self.metrics,  # <- Все метрики в ответе
+            "metrics": self.metrics,
             "predictions": predictions
         }
 
@@ -291,5 +263,4 @@ async def predict(days: str = "1,3,7,30,90,180"):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=9331)
