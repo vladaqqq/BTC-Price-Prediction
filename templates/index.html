@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC Price Prediction</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <h1>Bitcoin Price Prediction</h1>
+
+    <div class="predictions">
+        <div class="card current">
+            <h2>Current Price</h2>
+            <div class="price" id="current">Loading...</div>
+        </div>
+
+        <div class="cards-container">
+            <div class="card">
+                <h2>1 Day</h2>
+                <div class="price" id="1">-</div>
+                <div class="percent" id="p1">-</div>
+            </div>
+            <div class="card">
+                <h2>3 Days</h2>
+                <div class="price" id="3">-</div>
+                <div class="percent" id="p3">-</div>
+            </div>
+            <div class="card">
+                <h2>7 Days</h2>
+                <div class="price" id="7">-</div>
+                <div class="percent" id="p7">-</div>
+            </div>
+            <div class="card">
+                <h2>30 Days</h2>
+                <div class="price" id="30">-</div>
+                <div class="percent" id="p30">-</div>
+            </div>
+            <div class="card">
+                <h2>90 Days</h2>
+                <div class="price" id="90">-</div>
+                <div class="percent" id="p90">-</div>
+            </div>
+        </div>
+    </div>
+
+    <canvas id="chart"></canvas>
+
+    <script>
+        let chartInstance = null;
+
+        async function update() {
+            try {
+                const response = await fetch('/api/predict');
+                const data = await response.json();
+
+                if (data.error) {
+                    document.getElementById('current').textContent = "Error loading data";
+                    return;
+                }
+
+                document.getElementById('current').textContent = `$${data.current_price.toFixed(2)}`;
+
+                // Обновление карточек
+                Object.entries(data.predictions).forEach(([days_key, price]) => {
+                    const days = days_key.replace('_days', '');
+                    const percent = ((price.price - data.current_price) / data.current_price * 100).toFixed(2);
+
+                    const priceEl = document.getElementById(days);
+                    const percentEl = document.getElementById(`p${days}`);
+
+                    if (priceEl) priceEl.textContent = `$${price.price.toFixed(2)}`;
+                    if (percentEl) percentEl.textContent = `${percent}%`;
+                });
+
+                const chartData = {
+                    labels: ['Current', '1 Day', '3 Days', '7 Days', '30 Days', '90 Days'],
+                    datasets: [{
+                        label: 'BTC Price',
+                        data: [
+                            data.current_price,
+                            data.predictions["1_days"]?.price,
+                            data.predictions["3_days"]?.price,
+                            data.predictions["7_days"]?.price,
+                            data.predictions["30_days"]?.price,
+                            data.predictions["90_days"]?.price
+                        ],
+                        borderColor: 'orange',
+                        backgroundColor: 'rgba(255, 165, 0, 0.3)',
+                        tension: 0.1,
+                        fill: true
+                    }]
+                };
+
+                if (chartInstance) {
+                    chartInstance.data = chartData;
+                    chartInstance.update();
+                } else {
+                    chartInstance = new Chart(document.getElementById('chart'), {
+                        type: 'line',
+                        data: chartData
+                    });
+                }
+
+            } catch (err) {
+                document.getElementById('current').textContent = "Failed to fetch";
+                console.error("Update error:", err);
+            }
+        }
+
+        update();
+        setInterval(update, 60000);
+    </script>
+</body>
+</html>
