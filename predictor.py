@@ -1,174 +1,135 @@
-import pandas as pd
+import os
 import numpy as np
+import pandas as pd
 import requests
-from typing import List, Tuple, Dict
-from sklearn.preprocessing import RobustScaler
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 from lightgbm import LGBMRegressor
+from scipy.stats import zscore
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import RobustScaler
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 import optuna
-from optuna.samplers import TPESampler
-import logging
+from config import logger
 
-logger = logging.getLogger(__name__)
 
-class EnhancedBTCPredictor:
+class BTCPredictor:
     def __init__(self):
         self.scaler = RobustScaler()
         self.model = None
-        self.best_params = None
-        self.initialized = False
-        self.feature_names = []
-        self.scaler_fitted = False
-        self.metrics: Dict[str, float] = {}
+        self.metrics = {}
         self.random_seed = 42
+        self.window_size = 5
+        self.initialized = False
 
     def initialize(self):
         try:
-            logger.info("Initializing model with metrics...")
-            df = self.load_data(days=3000)
-            df = self.enhanced_feature_engineering(df)
-            X, y = self.prepare_features(df)
+            os.makedirs("static", exist_ok=True)
+            os.makedirs("templates", exist_ok=True)
 
+            df = self.load_data().pipe(self.feature_engineering)
+            X, y = df.drop(columns=['target']), df['target']
+            X = X.mask(np.abs(zscore(X)) > 3).ffill().bfill()
             self.scaler.fit(X)
-            self.scaler_fitted = True
 
-            X_scaled = self.scaler.transform(X)
-            self.best_params = self.optimize_hyperparameters(
-                pd.DataFrame(X_scaled, columns=X.columns), y
-            )
+            study = optuna.create_study(direction='maximize',
+                                        sampler=optuna.samplers.TPESampler(seed=self.random_seed))
+            study.optimize(lambda trial: self.objective(trial, X, y), n_trials=40)
 
-            self.train_final_model(X, y)
+            self.model = LGBMRegressor(**study.best_params, random_state=self.random_seed)
+            self.model.fit(self.scaler.transform(X), y)
             self.calculate_metrics(X, y)
 
+            logger.info(f"Model metrics: {self.metrics}")
             self.initialized = True
-            logger.info(f"Model initialized. Metrics: {self.metrics}")
+            logger.info("Model initialized successfully")
         except Exception as e:
-            logger.critical(f"Initialization failed: {str(e)}")
-            raise
+            logger.error(f"Initialization failed: {str(e)}")
+            self.initialized = False
 
-    def load_data(self, days: int = 2000) -> pd.DataFrame:
-        url = "https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol": "BTCUSDT",
-            "interval": "1d",
-            "limit": min(days, 3000)
-        }
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-
-        df = pd.DataFrame(
-            response.json(),
-            columns=[
-                "timestamp", "open", "high", "low", "close", "volume",
-                "close_time", "quote_volume", "trades_count",
-                "taker_buy_volume", "taker_quote_volume", "ignore"
-            ]
-        )
-
-        numeric_cols = ["open", "high", "low", "close", "volume"]
-        df[numeric_cols] = df[numeric_cols].astype(float)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        return df.set_index("timestamp").sort_index().ffill()
-
-    def enhanced_feature_engineering(self, df: pd.DataFrame) -> pd.DataFrame:
-        df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
-        df['price_range'] = (df['high'] - df['low']) / df['close']
-        df['volume_ma'] = df['volume'].rolling(7).mean()
-        df['volume_ratio'] = df['volume'] / df['volume_ma']
-
-        windows = [7, 14, 30, 50]
-        for window in windows:
-            df[f'ma_{window}'] = df['close'].rolling(window).mean()
-            df[f'ema_{window}'] = df['close'].ewm(span=window).mean()
-            df[f'volatility_{window}'] = df['close'].pct_change().rolling(window).std()
-
-        for lag in [1, 3, 7, 14]:
-            df[f'close_lag_{lag}'] = df['close'].shift(lag)
-            df[f'volume_lag_{lag}'] = df['volume'].shift(lag)
-
-        df['target'] = (df['close'].shift(-1) - df['close']) / df['close']
-        return df.dropna().copy()
-
-    def prepare_features(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-        self.feature_names = df.drop(columns=['target']).columns.tolist()
-        return df.drop(columns=['target']), df['target']
-
-    def optimize_hyperparameters(self, X: pd.DataFrame, y: pd.Series) -> dict:
-        def objective(trial):
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 500, 2000),
-                'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.1),
-                'num_leaves': trial.suggest_int('num_leaves', 20, 100),
-                'max_depth': trial.suggest_int('max_depth', 3, 12),
-                'min_child_samples': trial.suggest_int('min_child_samples', 10, 100),
-                'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-                'random_state': self.random_seed
-            }
-
-            tscv = TimeSeriesSplit(n_splits=5)
-            scores = []
-
-            for train_idx, val_idx in tscv.split(X):
-                X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-                y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-
-                model = LGBMRegressor(**params)
-                model.fit(X_train, y_train, feature_name=X.columns.tolist(), categorical_feature=[])
-                preds = model.predict(X_val)
-                scores.append(mean_absolute_error(y_val, preds))
-
-            return np.mean(scores)
-
-        study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=self.random_seed))
-        study.optimize(objective, n_trials=30)
-        return study.best_params
-
-    def train_final_model(self, X: pd.DataFrame, y: pd.Series):
-        X_scaled = self.scaler.transform(X)
-        self.model = LGBMRegressor(**self.best_params, random_state=self.random_seed)
-        self.model.fit(X_scaled, y, feature_name=X.columns.tolist(), categorical_feature=[])
-
-    def calculate_metrics(self, X: pd.DataFrame, y: pd.Series):
-        X_scaled = self.scaler.transform(X)
+    def calculate_metrics(self, X, y):
+        X_scaled = pd.DataFrame(self.scaler.transform(X), columns=X.columns)
         y_pred = self.model.predict(X_scaled)
+
         mae = mean_absolute_error(y, y_pred)
-        directional_accuracy = np.mean(np.sign(y) == np.sign(y_pred)) * 100
+        direction_acc = np.mean(np.sign(y) == np.sign(y_pred)) * 100
         r2 = r2_score(y, y_pred)
         rmse = np.sqrt(mean_squared_error(y, y_pred))
+        last_7_days = slice(-7, None)
+        rolling_acc = np.mean(np.sign(y.iloc[last_7_days]) == np.sign(y_pred[last_7_days])) * 100
 
         self.metrics = {
-            "MAE": round(mae, 6),
-            "MAE (%)": round(mae * 100, 2),
-            "Directional Accuracy (%)": round(directional_accuracy, 2),
-            "R²": round(r2, 4),
-            "RMSE": round(rmse, 6)
+            "MAE": f"{mae:.6f}",
+            "MAE (%)": f"{mae * 100:.2f}%",
+            "Direction Accuracy": f"{direction_acc:.1f}%",
+            "7-Day Accuracy": f"{rolling_acc:.1f}%",
+            "R²": f"{r2:.4f}",
+            "RMSE": f"{rmse:.6f}"
         }
 
-    def predict_multiple_days(self, X: pd.DataFrame, days: List[int]) -> dict:
-        if not self.initialized:
-            raise RuntimeError("Model not initialized")
+    def feature_engineering(self, df):
+        df = df.assign(
+            log_ret=np.log(df['close'] / df['close'].shift(1)),
+            rsi=lambda x: 100 - (100 / (1 + (x.close.diff().clip(lower=0).rolling(14).mean() /
+                                             x.close.diff().clip(upper=0).abs().rolling(14).mean()))),
+            macd=lambda x: x.close.ewm(span=12).mean() - x.close.ewm(span=26).mean(),
+            obv=lambda x: (np.sign(x.close.diff()) * x.volume).cumsum(),
+            **{f'close_lag_{lag}': df.close.shift(lag) for lag in [1, 3, 7, 14, 30]},
+            target=lambda x: (x.close.shift(-1) - x.close) / x.close
+        ).dropna()
+        return df
 
-        predictions = {}
-        current_price = X['close'].iloc[-1]
-        X_scaled = self.scaler.transform(X)
-        X_final = pd.DataFrame(X_scaled, columns=self.feature_names)
+    def objective(self, trial, X, y):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 800, 2000),
+            'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.1, log=True),
+            'num_leaves': trial.suggest_int('num_leaves', 20, 100),
+            'max_depth': trial.suggest_int('max_depth', 5, 15),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0)
+        }
 
-        for days_ahead in days:
-            pred_return = self.model.predict(X_final)[0]
-            predicted_price = current_price * (1 + pred_return) ** days_ahead
-            predictions[f'{days_ahead}_days'] = {
-                'price': round(predicted_price, 2),
-                'return (%)': round(pred_return * 100, 2),
-                'confidence': f"±{self.metrics['MAE (%)']}% (DA: {self.metrics['Directional Accuracy (%)']}%)"
-            }
+        scores = []
+        for train_idx, val_idx in TimeSeriesSplit(5).split(X):
+            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+            model = LGBMRegressor(**params)
+            model.fit(
+                pd.DataFrame(self.scaler.transform(X_train), columns=X.columns),
+                y_train
+            )
+            preds = model.predict(pd.DataFrame(self.scaler.transform(X_val), columns=X.columns))
+            scores.append(np.mean(np.sign(preds) == np.sign(y_val)))
+
+        return np.mean(scores)
+
+    def load_data(self):
+        data = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 3000}
+        ).json()
+
+        df = pd.DataFrame(data)[[0, 1, 2, 3, 4, 5]].astype(float)
+        df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        return df.set_index(pd.to_datetime(df['timestamp'], unit='ms'))
+
+    def predict(self, days: list):
+        df = self.load_data().pipe(self.feature_engineering)
+        X = df.drop(columns='target', errors='ignore').tail(self.window_size)
+
+        X_scaled = pd.DataFrame(self.scaler.transform(X), columns=X.columns)
+        preds = self.model.predict(X_scaled)
+        avg_return = np.mean(preds)
+        current_price = df.close.iloc[-1]
+
+        predictions = {
+            f'{d}_days': {
+                'price': round(current_price * (1 + avg_return) ** d, 2),
+                'return (%)': round(avg_return * 100, 2)
+            } for d in days
+        }
 
         return {
             "current_price": round(current_price, 2),
-            "metrics": self.metrics,
-            "predictions": predictions
+            "predictions": predictions,
+            "metrics": self.metrics
         }
-
-# Экземпляр модели
-predictor = EnhancedBTCPredictor()

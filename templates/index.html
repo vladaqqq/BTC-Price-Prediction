@@ -55,22 +55,22 @@
                 const response = await fetch('/api/predict');
                 const data = await response.json();
 
-                if (data.error) {
-                    document.getElementById('current').textContent = "Error loading data";
+                if (data.error || data.status === 'error') {
+                    document.getElementById('current').textContent = data.error || "Error loading data";
                     return;
                 }
 
                 document.getElementById('current').textContent = `$${data.current_price.toFixed(2)}`;
 
-                // Обновление карточек
-                Object.entries(data.predictions).forEach(([days_key, price]) => {
+                Object.entries(data.predictions).forEach(([days_key, prediction]) => {
                     const days = days_key.replace('_days', '');
-                    const percent = ((price.price - data.current_price) / data.current_price * 100).toFixed(2);
-
                     const priceEl = document.getElementById(days);
                     const percentEl = document.getElementById(`p${days}`);
 
-                    if (priceEl) priceEl.textContent = `$${price.price.toFixed(2)}`;
+                    const price = prediction.price;
+                    const percent = ((price - data.current_price) / data.current_price * 100).toFixed(2);
+
+                    if (priceEl) priceEl.textContent = `$${price.toFixed(2)}`;
                     if (percentEl) percentEl.textContent = `${percent}%`;
                 });
 
@@ -104,8 +104,8 @@
                 }
 
             } catch (err) {
-                document.getElementById('current').textContent = "Failed to fetch";
                 console.error("Update error:", err);
+                document.getElementById('current').textContent = "Failed to fetch";
             }
         }
 

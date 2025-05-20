@@ -1,24 +1,12 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from routers import router
-from predictor import EnhancedBTCPredictor
-import logging
+import uvicorn
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+app = FastAPI(title="BTC Predictor Pro", version="5.3")
 
-app = FastAPI(title="BTC Price Predictor Pro", version="4.3")
-
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
-templates = Jinja2Templates(directory="app/templates")
-
-predictor = EnhancedBTCPredictor()
-
-@app.on_event("startup")
-async def startup():
-    predictor.initialize()
-
-# Подключение маршрутов
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(router)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=9331)
